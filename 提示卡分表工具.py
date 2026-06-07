@@ -80,11 +80,9 @@ def split_prompt_card(input_path: str) -> str:
     title_font = Font(name="微软雅黑", bold=True, size=14, color="1F4E79")
     wrap_align = Alignment(wrap_text=True, vertical="top")
 
-    # --- 删除旧的个人 sheet（保留 Sheet1/2/3）---
-    keep = {"Sheet1", "Sheet2", "Sheet3"}
+    # --- 删除所有旧 sheet（只保留个人页和查询页）---
     for s in list(wb.sheetnames):
-        if s not in keep:
-            del wb[s]
+        del wb[s]
 
     # --- 逐个创建个人 sheet ---
     created = []
