@@ -1,177 +1,226 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-提示卡分表工具
-================
-将总表中的每行数据拆分为独立的 sheet，方便阅读。
-- 每个车组生成一个 sheet，以"姓名+车次"命名
-- 新建"查询页"，带超链接可跳转到对应 sheet
-- 原文件不变，生成新文件（分表）
-
-用法：
-  1. 拖拽 Excel 文件到本程序图标上
-  2. 或命令行：提示卡分表工具.exe <文件路径>
+提示卡分表工具 - 将总表每行拆分为独立 sheet
 """
 
-import sys
-import os
-import re
-import traceback
+import sys, os, re, traceback
 
-# ----- 只在打包时用到的导入声明（供 PyInstaller 识别）-----
-# noinspection PyUnresolvedReferences
-_hook_openpyxl = (
-    "openpyxl",
-    "openpyxl.styles",
-    "openpyxl.utils",
-    "openpyxl.workbook",
-    "openpyxl.worksheet",
-)
+# PyInstaller hook marker
+_hook_openpyxl = ("openpyxl", "openpyxl.styles", "openpyxl.utils",
+                  "openpyxl.workbook", "openpyxl.worksheet")
 
 
 def split_prompt_card(input_path: str) -> str:
-    """处理单个 Excel 文件，返回输出文件路径"""
     import openpyxl
     from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
-    # --- 校验 ---
     if not os.path.isfile(input_path):
         raise FileNotFoundError(f"文件不存在：{input_path}")
-
     ext = os.path.splitext(input_path)[1].lower()
     if ext not in (".xlsx", ".xlsm"):
         raise ValueError(f"不支持的文件格式：{ext}，请使用 .xlsx 文件")
 
-    # --- 打开 ---
     wb = openpyxl.load_workbook(input_path)
     ws_src = wb.active
 
-    # 读取表头（第2行）
-    headers = []
-    for col in range(1, ws_src.max_column + 1):
-        headers.append(ws_src.cell(row=2, column=col).value)
+    # 表头（第2行）
+    headers = [ws_src.cell(row=2, column=c).value for c in range(1, ws_src.max_column + 1)]
 
-    # --- 收集数据行 ---
+    # 收集数据行
     rows_data = []
     for r in range(3, ws_src.max_row + 1):
-        chezu = ws_src.cell(row=r, column=3).value
-        if not chezu or not str(chezu).strip():
+        if not ws_src.cell(row=r, column=3).value:
             continue
-        values = []
-        for c in range(1, ws_src.max_column + 1):
-            values.append(ws_src.cell(row=r, column=c).value)
-        rows_data.append(values)
+        rows_data.append([ws_src.cell(row=r, column=c).value for c in range(1, ws_src.max_column + 1)])
 
     if not rows_data:
-        raise ValueError("未找到任何有效数据（车组号列为空）")
+        raise ValueError("未找到任何有效数据")
 
-    # --- 样式定义 ---
+    # 配色
+    DARK = "1B3A5C"
+    ACCENT = "2B65A8"
+    BG_TITLE = "E8F0FE"
+    VALUE_C = "333333"
+
     thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
+        left=Side(style='thin', color='C0C0C0'),
+        right=Side(style='thin', color='C0C0C0'),
+        top=Side(style='thin', color='C0C0C0'),
+        bottom=Side(style='thin', color='C0C0C0'),
     )
-    label_font = Font(name="微软雅黑", bold=True, size=11, color="FFFFFF")
-    label_fill = PatternFill(
-        start_color="4472C4", end_color="4472C4", fill_type="solid"
+    no_top = Border(
+        left=Side(style='thin', color='C0C0C0'),
+        right=Side(style='thin', color='C0C0C0'),
+        top=Side(style=None),
+        bottom=Side(style='thin', color='C0C0C0'),
     )
-    value_font = Font(name="微软雅黑", size=11, color="333333")
-    title_font = Font(name="微软雅黑", bold=True, size=14, color="1F4E79")
-    wrap_align = Alignment(wrap_text=True, vertical="top")
 
-    # --- 删除所有旧 sheet（只保留个人页和查询页）---
+    def fmt_val(v):
+        if hasattr(v, 'strftime'):
+            return v.strftime('%Y-%m-%d')
+        return str(v).strip() if v is not None else ''
+
+    def calc_lines(text, chars_per_line):
+        if not text:
+            return 1
+        total = 0
+        for p in text.split('\n'):
+            if not p:
+                total += 1
+                continue
+            w = sum(2 if ord(ch) > 127 else 1 for ch in p)
+            total += max(1, -(-w // chars_per_line))
+        return total + max(1, int(total * 0.2))  # +20% margin
+
+    def make_label_cell(ws, r, c, label):
+        cl = ws.cell(row=r, column=c)
+        cl.value = label
+        cl.font = Font(name='微软雅黑', bold=True, size=11, color='FFFFFF')
+        cl.fill = PatternFill(start_color=ACCENT, end_color=ACCENT, fill_type='solid')
+        cl.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cl.border = thin_border
+
+    def make_value_cell(ws, r, c, value, cpl):
+        cv = ws.cell(row=r, column=c)
+        cv.value = value
+        cv.font = Font(name='微软雅黑', size=11, color=VALUE_C)
+        cv.alignment = Alignment(wrap_text=True, vertical='top')
+        cv.border = thin_border
+        ws.row_dimensions[r].height = max(28, calc_lines(value, cpl) * 20)
+
+    def pair_field(ws, r, label_col, label, val_col, value, cpl):
+        """写一对 标签+值（不合并）"""
+        make_label_cell(ws, r, label_col, label)
+        make_value_cell(ws, r, val_col, value, cpl)
+
+    def full_width_field(ws, r, label, value):
+        """标签在A，值合并B:D"""
+        make_label_cell(ws, r, 1, label)
+        ws.merge_cells(f'B{r}:D{r}')
+        make_value_cell(ws, r, 2, value, 140)  # B52 + C18 + D67 ≈ 137
+        for cc in (3, 4):
+            ws.cell(row=r, column=cc).border = thin_border
+
+    def section_header(ws, r, title):
+        ws.merge_cells(f'A{r}:D{r}')
+        h = ws.cell(row=r, column=1)
+        h.value = f"  {title}"
+        h.font = Font(name='微软雅黑', bold=True, size=12, color='FFFFFF')
+        h.fill = PatternFill(start_color=DARK, end_color=DARK, fill_type='solid')
+        h.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+        h.border = Border(
+            left=Side(style='medium', color=DARK), right=Side(style='medium', color=DARK),
+            top=Side(style='medium', color=DARK), bottom=Side(style='thin', color=DARK),
+        )
+        ws.row_dimensions[r].height = 28
+
+    # 删除旧 sheet
     for s in list(wb.sheetnames):
         del wb[s]
 
-    # --- 逐个创建个人 sheet ---
     created = []
     seen_names = {}
 
     for values in rows_data:
-        chezu = str(values[2]).strip() if values[2] else ""
-        jixieshi = str(values[4]).strip() if values[4] else ""
-        checi = str(values[3]).strip() if values[3] else ""
+        chezu = fmt_val(values[2])
+        jixieshi = fmt_val(values[4])
+        checi = fmt_val(values[3])
 
-        # Sheet 名 = 姓名+车次（清理非法字符）
         raw = f"{jixieshi}{checi}"
-        safe = re.sub(r'[\\/?*\[\]]', "·", raw)
-        base = safe[:31]
-
-        if base in seen_names:
-            seen_names[base] += 1
-            sheet_name = f"{base[:28]}_{seen_names[base]}"
+        safe = re.sub(r'[\\/?*\[\]]', '·', raw)[:31]
+        name = safe
+        if name in seen_names:
+            seen_names[name] += 1
+            name = f"{safe[:28]}_{seen_names[name]}"
         else:
-            seen_names[base] = 1
-            sheet_name = base
+            seen_names[name] = 1
 
-        ws_new = wb.create_sheet(title=sheet_name)
+        ws_new = wb.create_sheet(title=name)
 
         # 标题
-        ws_new.merge_cells("A1:B1")
-        c = ws_new["A1"]
-        c.value = f"提示卡 — {chezu}（{jixieshi}）"
-        c.font = title_font
-        c.alignment = Alignment(horizontal="left", vertical="center")
-        ws_new.row_dimensions[1].height = 30
+        ws_new.merge_cells('A1:D1')
+        ws_new.row_dimensions[1].height = 48
+        c = ws_new['A1']
+        c.value = f"🚄 提示卡    {chezu}（{jixieshi}）"
+        c.font = Font(name='微软雅黑', bold=True, size=20, color=DARK)
+        c.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+        c.fill = PatternFill(start_color=BG_TITLE, end_color=BG_TITLE, fill_type='solid')
 
-        ws_new["A2"] = None  # 空行
+        ws_new.row_dimensions[2].height = 6
 
-        cur = 3
-        for idx, h in enumerate(headers):
-            h_name = h.strip() if h else ""
-            val = values[idx]
+        # === 分组1：基本运行信息（双列）===
+        r = 3
+        section_header(ws_new, r, "🚄 基本运行信息")
+        r += 1
 
-            if hasattr(val, "strftime"):
-                val = val.strftime("%Y-%m-%d")
-            elif val is None:
-                val = ""
-            else:
-                val = re.sub(r"\n{3,}", "\n\n", str(val).strip())
+        pair_field(ws_new, r, 1, "日期", 2, fmt_val(values[1]), 50)
+        pair_field(ws_new, r, 3, "车组号", 4, chezu, 65)
+        r += 1
 
-            # 标签
-            cl = ws_new.cell(row=cur, column=1)
-            cl.value = h_name
-            cl.font = label_font
-            cl.fill = label_fill
-            cl.alignment = Alignment(
-                horizontal="center", vertical="center", wrap_text=True
-            )
-            cl.border = thin_border
+        pair_field(ws_new, r, 1, "机械师", 2, jixieshi, 50)
+        pair_field(ws_new, r, 3, "所属配属", 4, fmt_val(values[14]), 65)
+        r += 1
 
-            # 值
-            cv = ws_new.cell(row=cur, column=2)
-            cv.value = val
-            cv.font = value_font
-            cv.alignment = wrap_align
-            cv.border = thin_border
+        full_width_field(ws_new, r, "交路名称", fmt_val(values[0]))
+        r += 1
+        full_width_field(ws_new, r, "动调电话", fmt_val(values[5]))
+        r += 1
 
-            lines = max(1, len(val) // 80 + val.count("\n") + 1)
-            ws_new.row_dimensions[cur].height = max(25, lines * 18)
-            cur += 1
+        ws_new.row_dimensions[r].height = 6
+        r += 1
 
-        ws_new.column_dimensions["A"].width = 28
-        ws_new.column_dimensions["B"].width = 100
-        created.append((sheet_name, chezu, jixieshi, checi))
+        # === 分组2：行车条件 ===
+        section_header(ws_new, r, "🌤 行车条件")
+        r += 1
+        full_width_field(ws_new, r, "沿途天气", fmt_val(values[6])); r += 1
+        full_width_field(ws_new, r, "行车限制条件重点提示", fmt_val(values[7])); r += 1
+        full_width_field(ws_new, r, "交路运行情况", fmt_val(values[8])); r += 1
 
-    # --- 创建查询页（放到最前面）---
-    if "查询页" in wb.sheetnames:
-        del wb["查询页"]
+        ws_new.row_dimensions[r].height = 6
+        r += 1
 
+        # === 分组3：检修改造 ===
+        section_header(ws_new, r, "🔧 检修改造")
+        r += 1
+        full_width_field(ws_new, r, "动车组源头质量和加装改造", fmt_val(values[9])); r += 1
+        full_width_field(ws_new, r, "重点跟踪故障和关键配件更换", fmt_val(values[10])); r += 1
+        full_width_field(ws_new, r, "检修信息", fmt_val(values[11])); r += 1
+
+        ws_new.row_dimensions[r].height = 6
+        r += 1
+
+        # === 分组4：警示提示 ===
+        section_header(ws_new, r, "⚠ 警示提示")
+        r += 1
+        full_width_field(ws_new, r, "典型案例警示", fmt_val(values[12])); r += 1
+        full_width_field(ws_new, r, "作业风险提示", fmt_val(values[13])); r += 1
+
+        # 列宽（跟用户调整一致）
+        ws_new.column_dimensions['A'].width = 24
+        ws_new.column_dimensions['B'].width = 52
+        ws_new.column_dimensions['C'].width = 18
+        ws_new.column_dimensions['D'].width = 67
+
+        # 隐藏网格线 → 卡片效果
+        ws_new.sheet_view.showGridLines = False
+
+        created.append((name, chezu, jixieshi, checi))
+
+    # === 查询页 ===
     ws_q = wb.create_sheet(title="查询页", index=0)
+    ws_q.sheet_view.showGridLines = False
 
-    ws_q.merge_cells("A1:D1")
-    t = ws_q["A1"]
+    ws_q.merge_cells('A1:D1')
+    t = ws_q['A1']
     t.value = "提示卡查询 — 点击跳转"
-    t.font = Font(name="微软雅黑", bold=True, size=16, color="1F4E79")
-    t.alignment = Alignment(horizontal="center", vertical="center")
-    ws_q.row_dimensions[1].height = 36
+    t.font = Font(name='微软雅黑', bold=True, size=16, color=DARK)
+    t.alignment = Alignment(horizontal='center', vertical='center')
+    ws_q.row_dimensions[1].height = 40
 
-    hdr_fill = PatternFill(
-        start_color="4472C4", end_color="4472C4", fill_type="solid"
-    )
-    hdr_font = Font(name="微软雅黑", bold=True, size=11, color="FFFFFF")
-    hdr_align = Alignment(horizontal="center", vertical="center")
+    hdr_fill = PatternFill(start_color=ACCENT, end_color=ACCENT, fill_type='solid')
+    hdr_font = Font(name='微软雅黑', bold=True, size=11, color='FFFFFF')
+    hdr_align = Alignment(horizontal='center', vertical='center')
 
     for ci, txt in enumerate(["序号", "车组号", "姓名+车次", "跳转"], 1):
         c = ws_q.cell(row=2, column=ci)
@@ -181,44 +230,37 @@ def split_prompt_card(input_path: str) -> str:
         c.alignment = hdr_align
         c.border = thin_border
 
-    link_font = Font(
-        name="微软雅黑", size=11, color="0563C1", underline="single"
-    )
-    normal_font = Font(name="微软雅黑", size=11)
+    link_font = Font(name='微软雅黑', size=11, color='0563C1', underline='single')
+    normal_font = Font(name='微软雅黑', size=11)
 
     for i, (sn, cz, js, cc) in enumerate(created, 1):
         rn = i + 2
-        c1 = ws_q.cell(row=rn, column=1)
-        c1.value = i
-        c1.font = normal_font
-        c1.alignment = Alignment(horizontal="center", vertical="center")
-        c1.border = thin_border
+        ws_q.cell(row=rn, column=1).value = i
+        ws_q.cell(row=rn, column=1).font = normal_font
+        ws_q.cell(row=rn, column=1).alignment = Alignment(horizontal='center', vertical='center')
+        ws_q.cell(row=rn, column=1).border = thin_border
 
-        c2 = ws_q.cell(row=rn, column=2)
-        c2.value = cz
-        c2.font = normal_font
-        c2.alignment = Alignment(horizontal="center", vertical="center")
-        c2.border = thin_border
+        ws_q.cell(row=rn, column=2).value = cz
+        ws_q.cell(row=rn, column=2).font = normal_font
+        ws_q.cell(row=rn, column=2).alignment = Alignment(horizontal='center', vertical='center')
+        ws_q.cell(row=rn, column=2).border = thin_border
 
-        c3 = ws_q.cell(row=rn, column=3)
-        c3.value = f"{js}{cc}"
-        c3.font = normal_font
-        c3.alignment = Alignment(horizontal="center", vertical="center")
-        c3.border = thin_border
+        ws_q.cell(row=rn, column=3).value = f"{js}{cc}"
+        ws_q.cell(row=rn, column=3).font = normal_font
+        ws_q.cell(row=rn, column=3).alignment = Alignment(horizontal='center', vertical='center')
+        ws_q.cell(row=rn, column=3).border = thin_border
 
-        c4 = ws_q.cell(row=rn, column=4)
-        c4.value = f'=HYPERLINK("#''{sn}''!A1","点击查看")'
-        c4.font = link_font
-        c4.alignment = Alignment(horizontal="center", vertical="center")
-        c4.border = thin_border
+        ws_q.cell(row=rn, column=4).value = f'=HYPERLINK("#''{sn}''!A1","点击查看")'
+        ws_q.cell(row=rn, column=4).font = link_font
+        ws_q.cell(row=rn, column=4).alignment = Alignment(horizontal='center', vertical='center')
+        ws_q.cell(row=rn, column=4).border = thin_border
         ws_q.row_dimensions[rn].height = 24
 
-    ws_q.column_dimensions["A"].width = 8
-    ws_q.column_dimensions["B"].width = 12
-    ws_q.column_dimensions["C"].width = 22
-    ws_q.column_dimensions["D"].width = 14
+    ws_q.column_dimensions['A'].width = 8
+    ws_q.column_dimensions['B'].width = 12
+    ws_q.column_dimensions['C'].width = 22
+    ws_q.column_dimensions['D'].width = 14
 
-    # --- 保存 ---
     base, ext = os.path.splitext(input_path)
     out_path = f"{base}（分表）{ext}"
     wb.save(out_path)
@@ -226,14 +268,11 @@ def split_prompt_card(input_path: str) -> str:
 
 
 def main():
-    """入口：支持拖拽 / 命令行参数 / 交互输入"""
     if len(sys.argv) >= 2:
-        # 命令行参数或拖拽
         inputs = sys.argv[1:]
     else:
-        # 交互模式
         print("=" * 50)
-        print("  提示卡分表工具 v1.0")
+        print("  提示卡分表工具 v2.0")
         print("=" * 50)
         inp = input("\n请拖入或输入 Excel 文件路径：\n> ").strip().strip('"')
         if not inp:
@@ -247,7 +286,6 @@ def main():
         if not os.path.isfile(path):
             print(f"  ✗ 跳过（文件不存在）：{path}")
             continue
-
         try:
             out = split_prompt_card(path)
             print(f"\n  ✓ 生成成功：{out}")
