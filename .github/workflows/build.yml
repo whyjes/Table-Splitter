@@ -1,0 +1,34 @@
+name: Build EXE
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller openpyxl
+
+      - name: Build single-file EXE
+        run: |
+          pyinstaller --onefile --console --name "提示卡分表工具" 提示卡分表工具.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 提示卡分表工具
+          path: dist/提示卡分表工具.exe
